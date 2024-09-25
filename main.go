@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"strings"
 	"time"
 
@@ -31,6 +30,14 @@ var client = ec2.New(ec2.Options{
 })
 
 func main() {
+	// make log.Print print to file instead of stdout
+	logFile, err := os.OpenFile(".kamui.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("failed to open log file, %v", err)
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
+
 	if code != "" {
 		loadCode()
 		client = ec2.New(ec2.Options{
@@ -50,37 +57,39 @@ func main() {
 		log.Fatalf("failed to get target instance, %v", err)
 	}
 
-	if instance.State.Name != types.InstanceStateNameRunning {
+	if instance.State.Name == types.InstanceStateNameStopped {
 		err := chStateTargetInstance(ec2Filters, types.InstanceStateNameRunning)
 		if err != nil {
 			log.Printf("failed to change instance state, %v", err)
 		}
-	}
-
-	defer func() {
-		err = chStateTargetInstance(ec2Filters, types.InstanceStateNameStopped)
+		targetIP, err := getTargetIP(ec2Filters)
 		if err != nil {
-			log.Fatalf("failed to change instance state, %v", err)
+			log.Printf("failed to get target IP, %v", err)
 		}
-	}()
-
-	targetIP, err := getTargetIP(ec2Filters)
-	if err != nil {
-		log.Printf("failed to get target IP, %v", err)
+		fmt.Print(targetIP)
+	} else if instance.State.Name == types.InstanceStateNameRunning {
+		err := chStateTargetInstance(ec2Filters, types.InstanceStateNameStopped)
+		if err != nil {
+			log.Printf("failed to change instance state, %v", err)
+		}
+		clearInstanceCache()
+		instance, err := getTargetInstance(ec2Filters)
+		if err != nil {
+			log.Printf("failed to get target instance, %v", err)
+		}
+		fmt.Print(instance.State.Name)
+	} else {
+		fmt.Printf("unsupported state %s", instance.State.Name)
+		log.Fatalf("unsupported state %s", instance.State.Name)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	// defer func() {
+	// 	err = chStateTargetInstance(ec2Filters, types.InstanceStateNameStopped)
+	// 	if err != nil {
+	// 		log.Fatalf("failed to change instance state, %v", err)
+	// 	}
+	// }()
 
-	err = ConnectSSH(ctx, ConnectSSHOptions{
-		User:         "ubuntu",
-		TargetIP:     targetIP,
-		MaxRetries:   5,
-		InitialDelay: 10 * time.Second,
-	})
-	if err != nil {
-		log.Printf("failed to connect SSH, %v\n", err)
-	}
 }
 
 func loadCode() {
@@ -215,7 +224,7 @@ func chStateTargetInstance(ec2Filters []types.Filter, state types.InstanceStateN
 		return fmt.Errorf("unsupported state %s", state)
 	}
 
-	timeout := 2 * time.Minute
+	timeout := 5 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	log.Printf("Waiting for the instance to be %s...\n", state)
@@ -232,11 +241,11 @@ func chStateTargetInstance(ec2Filters []types.Filter, state types.InstanceStateN
 			}
 
 			if instance.State.Name == state {
-				fmt.Print("\n")
+				log.Print("\n")
 				log.Printf("Instance %s is now %s\n", *instance.InstanceId, state)
 				return nil
 			}
-			fmt.Print(".")
+			log.Print(".")
 		}
 	}
 }
